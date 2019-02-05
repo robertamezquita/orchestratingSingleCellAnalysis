@@ -210,15 +210,38 @@ In the grand scheme of things, these are probably not problematic, but do somewh
 
 Lastly, before getting into real plots, we define colours based on technologies.
 
+
+## Cleaning up SingleCell
+
+* TRONCO is a package that does not appear to be primarily SingleCell.
+
+```{r}
+bad <- c('TRONCO')
+
+pkg_tbl <- pkg_tbl %>%
+    filter(!(Package %in% bad))
+```
+
+## Removing Microarray
+
+For our purposes, microarray will be removed in order to focus on development in the sequencing era of Bioconductor. However, flow and mass spec will be kept in as these are single cell assays.
+
+```{r}
+## pkg_tbl <- pkg_tbl %>%
+##     filter(!(Assay %in% 'Microarray'))
+```
+
 ## Defining Colours per Term
 
 Lastly, for aesthetics, we define a colour scale based on the number of terms searched against, using the nature palette from `ggsci`. 
 
 ```{r}
 new_terms <- unique(pkg_tbl$Assay)
+## colours_terms <- colorRampPalette(pal_npg()(10))(length(new_terms))
 colours_terms <- colorRampPalette(pal_npg()(10))(length(new_terms))
 names(colours_terms) <- new_terms
 ```
+
 
 # Initial Plots
 
@@ -231,39 +254,91 @@ pkg_tbl %>%
     geom_line(alpha = 0.1) +
     scale_colour_manual(values = colours_terms) +
     scale_fill_manual(values = colours_terms) +    
-##    scale_y_log10() +
-    facet_wrap(~ Assay, scales = 'free_y', ncol = 4)
+    scale_y_log10() +
+    facet_wrap(~ Assay, ncol = length(colours_terms)) +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1))
 ```
 
 As such, we need a transform to take the data and stack the layers together, e.g., for each technology, define a ymin and ymax that is _relative_ to the other technologies to enable stacking.
 
 ```{r}
-## Convert to wide (matrix) format; convert NA's to 0 for math purposes
-mat <- pkg_tbl %>%
-    select(Assay, Package, Date, Nb_of_distinct_IPs) %>%
-    arrange(Assay, Package, Date) %>%
-    spread(Date, Nb_of_distinct_IPs) %>%
-    mutate_all(~ ifelse(is.na(.), 0, .))
+exclude <- c('Microarray', 'FlowCytometry', 'MassSpectrometry')
 
-## Apply a cumulative sum across the rows to position each package and gather
-tbl_cs <- mat %>%
-    mutate_at(vars(`2009-01-01`:`2019-01-01`), cumsum) %>%
-    gather(Date, Nb_of_distinct_IPs, -Assay, -Package) %>%
-    arrange(desc(Nb_of_distinct_IPs))
-    
-tbl_cs %>%
-##    filter(Assay == 'SingleCell') %>%
-    ggplot(aes(x = Date, y = Nb_of_distinct_IPs,
-               colour = Assay, group = Package)) +
-    geom_line(size = 1) +
-    ## geom_ribbon(aes(ymax = Nb_of_distinct_IPs, ymin = 0, colour = Assay, fill = Assay),
-    ##             alpha = 0.1, size = 0) +
+## Determine the most popular assay types by the latest time point (excluding non-seq tech)
+tmp <- pkg_tbl %>%
+    group_by(Date, Assay) %>%
+    summarise(s = sum(Nb_of_distinct_IPs)) %>%    
+    filter(Date == as.Date('2019-01-01')) %>%
+    arrange(s) %>%
+    filter(!(Assay %in% exclude))     
+
+## Reorder factors by popularity at 2019, use distinct IPs, filter by assays
+dat_tbl <- pkg_tbl %>%
+    select(-Nb_of_downloads) %>%
+    filter(Nb_of_distinct_IPs != 0) %>%
+    filter(!(Assay %in% exclude)) %>%
+    mutate(Assay = fct_relevel(Assay, tmp$Assay))
+
+## Redo colors to be pretty
+new_terms <- unique(tmp$Assay)
+## colours_terms <- colorRampPalette(pal_npg()(10))(length(new_terms))
+colours_terms <- pal_jama(alpha = 0.7)(length(new_terms))
+names(colours_terms) <- new_terms
+
+## Panel A: stacked area plot of distinct IPs
+g1 <- dat_tbl %>%
+    group_by(Date, Assay) %>%
+    summarise(s = sum(Nb_of_distinct_IPs)) %>%
+    arrange(Date, Assay) %>%
+    group_by(Date) %>%
+    mutate(cs = cumsum(s)) %>%
+    mutate(cs_l = lag(cs)) %>%
+    mutate(cs_l = ifelse(is.na(cs_l), 0, cs_l)) %>%
+    ggplot(aes(x = Date, y = cs,
+               ymin = cs_l, ymax = cs,
+               group = Assay,
+               colour = Assay, fill = Assay)) +
+    geom_ribbon() +
     scale_colour_manual(values = colours_terms) +
-    scale_fill_manual(values = colours_terms) +
+    scale_fill_manual(values = colours_terms) + 
+    coord_cartesian(expand = FALSE) +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1),
+          legend.position = 'none') +
+    labs(x = '', y = 'Cumulative sum of Distinct IPs')
+
+## Panel B: number of packages
+g2 <- dat_tbl %>%
+    group_by(Date, Assay) %>%
+    count() %>%
+    arrange(Date, Assay) %>%
+    group_by(Date) %>%
+    mutate(cs = cumsum(n)) %>%
+    mutate(cs_l = lag(cs)) %>%
+    mutate(cs_l = ifelse(is.na(cs_l), 0, cs_l)) %>%
+    ggplot(aes(x = Date, y = cs,
+               ymin = cs_l, ymax = cs,
+               group = Assay,
+               colour = Assay, fill = Assay)) +
+    geom_ribbon() +
+    scale_colour_manual(values = colours_terms) +
+    scale_fill_manual(values = colours_terms) + 
     coord_cartesian(expand = FALSE) +
     theme(axis.text.x = element_text(angle = 30, hjust = 1)) +
-    scale_x_discrete(breaks = paste0(2009:2019, '-01-01')) +
-    labs(x = '', y = 'Number of Distinct IPs')
+    labs(x = '', y = 'Number of Packages')  
+
+library(patchwork)
+g1 + g2
+
+ggsave('data_analysis/fig1-v2_stacked-area-chart.pdf')
+
+## ## Panel C: Focus on Single-Cell
+## dat_tbl %>%
+##     filter(Assay == 'SingleCell') %>%
+##     arrange(Date, Assay) %>%
+##     ggplot(aes(x = Date, y = Nb_of_distinct_IPs,
+##                colour = Package)) +
+##     geom_line()
+
 
 
 ```
