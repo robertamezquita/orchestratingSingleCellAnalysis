@@ -94,17 +94,6 @@ pbmc3k <- normalize(pbmc3k)
 pbmc4k <- normalize(pbmc4k)
 ```
 
-### Multibatch Normalization
-
-We also rescale each batch to adjust for differences in sequencing depth between batches. The `multiBatchNorm()` function from the `scran` package recomputes log-normalized expression values after adjusting the size factors for systematic differences in coverage between `SingleCellExperiment` objects. The previously computed size factors only remove biases between cells within a single batch. This improves the quality of the correction step by removing one aspect of the technical differences between batches.
-
-```{r eval=FALSE}
-rescaled <- multiBatchNorm(pbmc3k, pbmc4k)
-pbmc3k <- rescaled[[1]]
-pbmc4k <- rescaled[[2]]
-```
-
-
 ## Feature Selection
 
 A key step across many data integration methods is the selection of informative features across the different experiments. This helps to speed up computation and possibly improve the resulting integration.
@@ -137,24 +126,19 @@ Finally, we combine the datasets into a unified `SingleCellExperiment` object fo
 
 ```{r eval=FALSE}
 ## total raw counts
-counts_pbmc <- cbind(counts(pbmc3k), counts(pbmc4k))
+counts_pbmc <- cbind(counts(pbmc3k[hvg_genes, ]), 
+                     counts(pbmc4k[hvg_genes, ]))
 
 ## total normalized counts (with multibatch normalization)
-logcounts_pbmc <- cbind(logcounts(pbmc3k), logcounts(pbmc4k))
+logcounts_pbmc <- cbind(logcounts(pbmc3k[hvg_genes, ]), 
+                        logcounts(pbmc4k[hvg_genes, ]))
 
 sce <- SingleCellExperiment( 
     assays = list(counts = counts_pbmc, logcounts = logcounts_pbmc),  
-    rowData = rowData(pbmc3k), # same as rowData(pbmc4k) 
-    colData = rbind(colData(pbmc3k), colData(pbmc4k)) 
+    rowData = rowData(pbmc3k[hvg_genes, ]), # same as rowData(pbmc4k[hvg_genes, ]) 
+    colData = rbind(colData(pbmc3k[hvg_genes, ]), colData(pbmc4k[hvg_genes, ])) 
 ) 
 ```
-
-For safekeeping, we will also store the `hvg_genes` from the prior section into the `sce` object via:
-
-```{r eval=FALSE}
-metadata(sce)$hvg_genes <- hvg_genes
-```
-
 
 ## Integrating Datasets
 
@@ -162,15 +146,14 @@ Here we will now be comparing the results of different approaches to integration
 
 ### Naive Approach
 
-The naive approach simply entails visualizing the combined `sce` object post-normalization with no attempt at batch correction. Here we manually calculate the PCA on the normalized data (retrieved via `logcounts(sce)` or, similarly, via `assay(sce, "logcounts")`, and then assign the result into the `reducedDim` slot of `sce`, naming it `"PCA_naive"`.
+The naive approach simply entails visualizing the combined `sce` object post-normalization with no attempt at batch correction. Here we manually calculate the PCA on the normalized data (retrieved via `logcounts(sce)` or, similarly, via `assay(sce, "logcounts")`, and then assign the result into the `reducedDim` slot of `sce`, naming it `"PCA"`.
 
 ```{r eval=FALSE}
-px <- prcomp(t(logcounts(sce)[hvg_genes, ]))
-reducedDim(sce, "PCA_naive") <- px$x[, 1:20]
+sce <- scater::runPCA(sce, ncomponents = 2)
 ```
 
 ```{r}
-plotReducedDim(sce, use_dimred = "PCA_naive",
+plotReducedDim(sce, use_dimred = "PCA",
                colour_by="Sample") + 
     ggtitle("PCA Without batch correction")
 ```
@@ -180,17 +163,16 @@ plotReducedDim(sce, use_dimred = "PCA_naive",
 The `limma` package, a popular framework for the statistical analysis of RNA-seq, has a function `removeBatchEffect()` which will be used here to correct the normalized expression matrix `logcounts` across the two batches. The result will be assigned into the `assays` slot of the `sce` object as `limma_corrected`, and then used for PCA, saving the result in the `reducedDim` slot as `"PCA_limma"`.
 
 ```{r eval=FALSE}
-limma_corrected <- limma::removeBatchEffect(logcounts(sce), batch = sce$Sample)
+limma_corrected <- 
+    limma::removeBatchEffect(logcounts(sce),batch = sce$Sample)
 assay(sce, "logcounts_limma") <- limma_corrected ## add new assay
-
-pl <- prcomp(t(assay(sce, 'logcounts_limma')[hvg_genes, ]))
-reducedDim(sce, "PCA_limma") <- pl$x[, 1:20]
+rm(limma_corrected)
 ```
 
 ```{r}
-plotReducedDim(sce, use_dimred = "PCA_limma",
-               colour_by="Sample") + 
-    ggtitle("PCA With limma removeBatchEffect() correction")
+plotPCASCE(sce, by_exprs_values = "logcounts_limma", 
+                      colour_by="Sample") + 
+        ggtitle("PCA With limma removeBatchEffect() correction")
 ```
 
 ### MNN Approach
@@ -199,10 +181,17 @@ The mutual nearest neighbors (MNN) approach within the `scran` package utilizes 
 
 Where `fastMNN()` differs from other integration methods such as the limma approach above is that it does _not_ produce a batch-corrected expression matrix. Thus, the result from `fastMNN()` should solely be treated as a reduced dimensionality representation, suitable for direct plotting, TSNE/UMAP, clustering, and trajectory analysis that relies on such results. The already (batch) normalized (via `normalize()` and `multiBatchNorm()`) can be supplied to other statistical frameworks that are better suited to handle batch effects, such as in the case of differential expression. 
 
+We also rescale each batch to adjust for differences in sequencing depth between batches. The `multiBatchNorm()` function from the `scran` package recomputes log-normalized expression values after adjusting the size factors for systematic differences in coverage between `SingleCellExperiment` objects. The previously computed size factors only remove biases between cells within a single batch. This improves the quality of the correction step by removing one aspect of the technical differences between batches.
+
+```{r eval=FALSE}
+rescaled <- multiBatchNorm(pbmc3k[hvg_genes, ], pbmc4k[hvg_genes, ])
+pbmc3k_rescaled <- rescaled[[1]]
+pbmc4k_rescaled <- rescaled[[2]]
+```
+
 ```{r eval=FALSE}
 ## Basic method to run - not run
-mnn_out <- fastMNN(sce[hvg_genes, sce$Sample == "pbmc3k"],
-                  sce[hvg_genes, sce$Sample == "pbmc4k"],
+mnn_out <- fastMNN(pbmc3k_rescaled, pbmc4k_rescaled,
                   ## subset.row = hvg_genes, ## same as subsetting above
                   k = 20, d = 50, approximate = TRUE,
                   BNPARAM = BiocNeighbors::AnnoyParam(),
@@ -212,8 +201,7 @@ mnn_out <- fastMNN(sce[hvg_genes, sce$Sample == "pbmc3k"],
 ```{r eval=FALSE}
 ## Adding parallelization and Annoy method for approximate nearest neighbors
 ## this makes fastMNN significantly faster on large data
-mnn_out <- fastMNN(sce[hvg_genes, sce$Sample == "pbmc3k"],
-                  sce[hvg_genes, sce$Sample == "pbmc4k"],
+mnn_out <- fastMNN(pbmc3k_rescaled, pbmc4k_rescaled,
                   ## subset.row = hvg_genes, ## same as subsetting above
                   k = 20, d = 50, approximate = TRUE,
                   BNPARAM = BiocNeighbors::AnnoyParam(),
